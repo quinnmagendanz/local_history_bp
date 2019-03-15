@@ -3,13 +3,6 @@
 #include <assert.h>
 #include "pin.H"
 
-// PASS       | TAKE
-// 0b11, 0b10 | 0b01, 0b00
-#define TB_TABLE_SIZE 4096
-#define TB_READ(index) tb_table[index >> 2] >> ((index & 0b11) << 1)
-#define TB_PASSED(index) tb_table[index >> 2] &= (((TB_READ(index) >> 1) | 0b10) << ((index & 0b11) << 1))
-#define TB_TAKEN(index) tb_table[index >> 2] &= (((TB_READ(index) << 1) & 0b11) << ((index & 0b11) << 1))
-
 static UINT64 takenCorrect = 0;
 static UINT64 takenIncorrect = 0;
 static UINT64 notTakenCorrect = 0;
@@ -26,7 +19,16 @@ class BranchPredictor
 
 };
 
-class myBranchPredictor: public BranchPredictor
+
+// PASS       | TAKE
+// 0b11, 0b10 | 0b01, 0b00
+#define TB_TABLE_SIZE 16384
+#define TB_INDEX(addr) (addr >> 2) & (TB_TABLE_SIZE - 1)
+#define TB_READ(index) tb_table[index >> 2] >> ((index & 0b11) << 1)
+#define TB_PASSED(index) tb_table[index >> 2] &= (((TB_READ(index) >> 1) | 0b10) << ((index & 0b11) << 1))
+#define TB_TAKEN(index) tb_table[index >> 2] &= (((TB_READ(index) << 1) & 0b11) << ((index & 0b11) << 1))
+
+class bimodalPredictor: public BranchPredictor
 {
 	private:
 		char tb_table[TB_TABLE_SIZE];
@@ -34,30 +36,71 @@ class myBranchPredictor: public BranchPredictor
         std::hash<UINT32> index_hash;
 
 	public:
-        myBranchPredictor() {}
+        bimodalPredictor() {}
 
         BOOL makePrediction(ADDRINT address)
 		{
 			//return TB_READ(index_hash(address) % TB_TABLE_SIZE) & 0b10;
-			return !(tb_table[address%TB_TABLE_SIZE] & 0b10);
+			return !(tb_table[TB_INDEX(address)] & 0b10);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
 			//if (takenActually) TB_TAKEN(index_hash(address) % TB_TABLE_SIZE);
 			//else TB_TAKEN(index_hash(address) % TB_TABLE_SIZE);
-			switch (tb_table[address%TB_TABLE_SIZE]) {
-				case 0 : tb_table[address%TB_TABLE_SIZE] += !takenActually;
+			switch (tb_table[TB_INDEX(address)]) {
+				case 0 : tb_table[TB_INDEX(address)] += !takenActually;
 						 break;
 				case 1 :
-				case 2 : tb_table[address%TB_TABLE_SIZE] += !takenActually;
-						 tb_table[address%TB_TABLE_SIZE] -= takenActually;
+				case 2 : tb_table[TB_INDEX(address)] += !takenActually;
+						 tb_table[TB_INDEX(address)] -= takenActually;
 						 break;
-				case 3 : tb_table[address%TB_TABLE_SIZE] -= takenActually;
+				case 3 : tb_table[TB_INDEX(address)] -= takenActually;
 			}
 		}
 
 };
+
+class gsharePredictor: public BranchPredictor
+{
+	public:
+		gsharePredictor() 
+		{
+		}
+
+		BOOL makePrediction(ADDRINT address)
+		{
+			return true;
+        }
+
+        void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
+		{
+
+		}
+};
+
+class myBranchPredictor: public BranchPredictor
+{
+	private:
+		BranchPredictor* biBP;
+
+	public:
+		myBranchPredictor() 
+		{
+			biBP = new bimodalPredictor();
+		}
+
+		BOOL makePrediction(ADDRINT address)
+		{
+			return biBP->makePrediction(address);
+        }
+
+        void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
+		{
+			biBP->makeUpdate(takenActually, takenPredicted, address);
+		}
+};
+
 
 BranchPredictor* BP;
 
