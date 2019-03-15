@@ -64,6 +64,29 @@ class Twobit_Table{
 		}
 };
 
+// 0 = Taken, 1 = Not
+typedef unsigned char HTYPE;
+
+class History_Table {
+	private:
+		HTYPE* table;
+		size_t length;
+
+	public: 
+		History_Table(size_t t_length) {
+			length = t_length;
+			table = new HTYPE[length];
+		}
+
+		HTYPE get(int index) {
+			return table[index % length];
+		}
+
+		void update(int index, bool event) {
+			table[index % length] = (table[index % length] << 1) + event;
+		}
+};
+
 class bimodalPredictor: public BranchPredictor
 {
 	private:
@@ -90,57 +113,92 @@ class bimodalPredictor: public BranchPredictor
 
 };
 
-#define HTYPE char
 #define GTABLE_SIZE 4096
 
 class gsharePredictor: public BranchPredictor
 {
 	private:
-		HTYPE glob_hist;
-		Twobit_Table* table;
+		History_Table* h_table;
+		Twobit_Table* t_table;
 
 	public:
 		gsharePredictor() 
 		{
-			table = new Twobit_Table(GTABLE_SIZE);
-			glob_hist = 0;
+			t_table = new Twobit_Table(GTABLE_SIZE);
+			h_table = new History_Table(1);
 		}
 
 		BOOL makePrediction(ADDRINT address)
 		{
-			return table->rd(HTYPE(address) ^ glob_hist);
+			HTYPE glob_hist = h_table->get(0);
+			return t_table->rd(HTYPE (address) ^ glob_hist);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
+		{	
+			HTYPE glob_hist = h_table->get(0);
+			t_table->update(HTYPE (address) ^ glob_hist, !takenActually);
+			h_table->update(0, !takenActually);
+		}
+};
+
+#define PTABLE_SIZE 4096
+#define LHIST_SIZE 4096
+
+class localHistoryPredictor: public BranchPredictor
+{
+	private:
+		History_Table* h_table;
+		Twobit_Table* t_table;
+
+	public:
+		localHistoryPredictor() 
 		{
-			table->update(HTYPE(address) ^ glob_hist, !takenActually);
-			glob_hist = (glob_hist << 1) + !takenActually;
+			t_table = new Twobit_Table(PTABLE_SIZE);
+			h_table = new History_Table(LHIST_SIZE);
+		}
+
+		BOOL makePrediction(ADDRINT address)
+		{
+			HTYPE addr_hist = h_table->get(address);
+			return t_table->rd(addr_hist);
+        }
+
+        void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
+		{	
+			HTYPE addr_hist = h_table->get(address);
+			t_table->update(addr_hist, !takenActually);
+			h_table->update(address, !takenActually);
 		}
 };
 
 class myBranchPredictor: public BranchPredictor
 {
 	private:
-		BranchPredictor* biBP;
-		BranchPredictor* gshareBP;
+		//BranchPredictor* biBP;
+		//BranchPredictor* gshareBP;
+		BranchPredictor* lhistBP;
 
 	public:
 		myBranchPredictor() 
 		{
-			biBP = new bimodalPredictor();
-			gshareBP = new gsharePredictor();
+			//biBP = new bimodalPredictor();
+			//gshareBP = new gsharePredictor();
+			lhistBP = new localHistoryPredictor();
 		}
 
 		BOOL makePrediction(ADDRINT address)
 		{
 			//return biBP->makePrediction(address);
-			return gshareBP->makePrediction(address);
+			//return gshareBP->makePrediction(address);
+			return lhistBP->makePrediction(address);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
 			//biBP->makeUpdate(takenActually, takenPredicted, address);
-			gshareBP->makeUpdate(takenActually, takenPredicted, address);
+			//gshareBP->makeUpdate(takenActually, takenPredicted, address);
+			lhistBP->makeUpdate(takenActually, takenPredicted, address);
 		}
 };
 
