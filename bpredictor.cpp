@@ -28,54 +28,93 @@ class BranchPredictor
 #define TB_PASSED(index) tb_table[index >> 2] &= (((TB_READ(index) >> 1) | 0b10) << ((index & 0b11) << 1))
 #define TB_TAKEN(index) tb_table[index >> 2] &= (((TB_READ(index) << 1) & 0b11) << ((index & 0b11) << 1))
 
+class Twobit_Table{
+	private:
+		unsigned char* table;
+		size_t length;
+
+		int row(int index) {
+			return index % length;
+		}
+
+	public:
+		Twobit_Table(size_t t_length)
+		{
+			length = t_length;
+			table = new unsigned char[length];
+		}
+
+		bool rd(int index) 
+		{
+			return !(table[row(index)] & 0b10);
+		}
+
+		bool update(int index, bool miss)
+		{
+			switch (table[row(index)]) {
+				case 0 : table[row(index)] += miss;
+						 break;
+				case 1 :
+				case 2 : table[row(index)] += miss;
+						 table[row(index)] -= !miss;
+						 break;
+				case 3 : table[row(index)] -= !miss;
+			}
+
+		}
+};
+
 class bimodalPredictor: public BranchPredictor
 {
 	private:
-		char tb_table[TB_TABLE_SIZE];
-
-        std::hash<UINT32> index_hash;
+		Twobit_Table* table;
 
 	public:
-        bimodalPredictor() {}
+        bimodalPredictor() 
+		{
+			table = new Twobit_Table(TB_TABLE_SIZE);
+		}
 
         BOOL makePrediction(ADDRINT address)
 		{
-			//return TB_READ(index_hash(address) % TB_TABLE_SIZE) & 0b10;
-			return !(tb_table[TB_INDEX(address)] & 0b10);
+			//return !(TB_READ(index_hash(address) % TB_TABLE_SIZE) & 0b10);
+			return table->rd(address);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
 			//if (takenActually) TB_TAKEN(index_hash(address) % TB_TABLE_SIZE);
 			//else TB_TAKEN(index_hash(address) % TB_TABLE_SIZE);
-			switch (tb_table[TB_INDEX(address)]) {
-				case 0 : tb_table[TB_INDEX(address)] += !takenActually;
-						 break;
-				case 1 :
-				case 2 : tb_table[TB_INDEX(address)] += !takenActually;
-						 tb_table[TB_INDEX(address)] -= takenActually;
-						 break;
-				case 3 : tb_table[TB_INDEX(address)] -= takenActually;
-			}
+			table->update(address, !takenActually);
 		}
 
 };
 
+#define HTYPE char
+#define GTABLE_SIZE 4096
+
 class gsharePredictor: public BranchPredictor
 {
+	private:
+		HTYPE glob_hist;
+		Twobit_Table* table;
+
 	public:
 		gsharePredictor() 
 		{
+			table = new Twobit_Table(GTABLE_SIZE);
+			glob_hist = 0;
 		}
 
 		BOOL makePrediction(ADDRINT address)
 		{
-			return true;
+			return table->rd(HTYPE(address) ^ glob_hist);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
-
+			table->update(HTYPE(address) ^ glob_hist, !takenActually);
+			glob_hist = (glob_hist << 1) + !takenActually;
 		}
 };
 
@@ -83,21 +122,25 @@ class myBranchPredictor: public BranchPredictor
 {
 	private:
 		BranchPredictor* biBP;
+		BranchPredictor* gshareBP;
 
 	public:
 		myBranchPredictor() 
 		{
 			biBP = new bimodalPredictor();
+			gshareBP = new gsharePredictor();
 		}
 
 		BOOL makePrediction(ADDRINT address)
 		{
-			return biBP->makePrediction(address);
+			//return biBP->makePrediction(address);
+			return gshareBP->makePrediction(address);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
-			biBP->makeUpdate(takenActually, takenPredicted, address);
+			//biBP->makeUpdate(takenActually, takenPredicted, address);
+			gshareBP->makeUpdate(takenActually, takenPredicted, address);
 		}
 };
 
