@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include "pin.H"
+#include <bitset>
 
 static UINT64 takenCorrect = 0;
 static UINT64 takenIncorrect = 0;
@@ -22,28 +23,42 @@ class BranchPredictor
 
 // PASS       | TAKE
 // 0b11, 0b10 | 0b01, 0b00
-#define TB_TABLE_SIZE 16384
-#define TB_INDEX(addr) (addr >> 2) & (TB_TABLE_SIZE - 1)
-#define TB_READ(index) tb_table[index >> 2] >> ((index & 0b11) << 1)
-#define TB_PASSED(index) tb_table[index >> 2] &= (((TB_READ(index) >> 1) | 0b10) << ((index & 0b11) << 1))
-#define TB_TAKEN(index) tb_table[index >> 2] &= (((TB_READ(index) << 1) & 0b11) << ((index & 0b11) << 1))
+// https://stackoverflow.com/questions/19492682/create-an-array-with-just-2-bit-for-each-cell-in-c
+template <size_t N> 
+class twoBit
+{
+		typedef typename std::bitset<2*N>::reference bitRef;
+		bitRef a, b;
 
+	public:
+		twoBit(bitRef a1, bitRef b1): a(a1), b(b1) {};
+		const twoBit &operator=(int i) { a = i%2; b = i/2; return *this; };
+		operator int() { return 2*b + a; };
+};
+
+template <size_t N> 
+class twoBitSet : private std::bitset<2*N>
+{
+		typedef typename std::bitset<2*N>::reference bitRef;
+	public:
+	    twoBit<N> operator[](int index)
+		{
+		    bitRef b1 = std::bitset<2*N>::operator[](2*index);
+		    bitRef b2 = std::bitset<2*N>::operator[](2*index + 1);
+		    return twoBit<N>(b1, b2);
+		};
+};
+
+template <size_t N>
 class Twobit_Table{
 	private:
-		unsigned char* table;
-		size_t length;
+		twoBitSet<N> table;
 
 		int row(int index) {
-			return index % length;
+			return index % N;
 		}
 
 	public:
-		Twobit_Table(size_t t_length)
-		{
-			length = t_length;
-			table = new unsigned char[length];
-		}
-
 		bool rd(int index) 
 		{
 			return !(table[row(index)] & 0b10);
@@ -52,123 +67,136 @@ class Twobit_Table{
 		bool update(int index, bool miss)
 		{
 			switch (table[row(index)]) {
-				case 0 : table[row(index)] += miss;
+				case 0 : table[row(index)] = table[row(index)] + miss;
 						 break;
 				case 1 :
-				case 2 : table[row(index)] += miss;
-						 table[row(index)] -= !miss;
+				case 2 : table[row(index)] = table[row(index)] + miss;
+						 table[row(index)] = table[row(index)] - !miss;
 						 break;
-				case 3 : table[row(index)] -= !miss;
+				case 3 : table[row(index)] = table[row(index)] - !miss;
 			}
 
 		}
 };
 
 // 0 = Taken, 1 = Not
-typedef unsigned char HTYPE;
+typedef unsigned short HTYPE;
 
+template <size_t N>
 class History_Table {
 	private:
 		HTYPE* table;
-		size_t length;
 
 	public: 
-		History_Table(size_t t_length) {
-			length = t_length;
-			table = new HTYPE[length];
+		History_Table() {
+			table = new HTYPE[N];
 		}
 
 		HTYPE get(int index) {
-			return table[index % length];
+			return table[index % N];
 		}
 
 		void update(int index, bool event) {
-			table[index % length] = (table[index % length] << 1) + event;
+			table[index % N] = (table[index % N] << 1) + event;
 		}
 };
 
+template <size_t BIMODAL_SIZE>
 class bimodalPredictor: public BranchPredictor
 {
 	private:
-		Twobit_Table* table;
+		Twobit_Table<BIMODAL_SIZE> table;
 
 	public:
-        bimodalPredictor() 
-		{
-			table = new Twobit_Table(TB_TABLE_SIZE);
-		}
-
         BOOL makePrediction(ADDRINT address)
 		{
 			//return !(TB_READ(index_hash(address) % TB_TABLE_SIZE) & 0b10);
-			return table->rd(address);
+			return table.rd(address);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
 			//if (takenActually) TB_TAKEN(index_hash(address) % TB_TABLE_SIZE);
 			//else TB_TAKEN(index_hash(address) % TB_TABLE_SIZE);
-			table->update(address, !takenActually);
+			table.update(address, !takenActually);
 		}
 
 };
 
-#define GTABLE_SIZE 4096
-
+template <size_t GTABLE_SIZE>
 class gsharePredictor: public BranchPredictor
 {
 	private:
-		History_Table* h_table;
-		Twobit_Table* t_table;
+		History_Table<1> h_table;
+		Twobit_Table<GTABLE_SIZE> t_table;
 
 	public:
-		gsharePredictor() 
-		{
-			t_table = new Twobit_Table(GTABLE_SIZE);
-			h_table = new History_Table(1);
-		}
-
 		BOOL makePrediction(ADDRINT address)
 		{
-			HTYPE glob_hist = h_table->get(0);
-			return t_table->rd(HTYPE (address) ^ glob_hist);
+			HTYPE glob_hist = h_table.get(0);
+			return t_table.rd(HTYPE (address) ^ glob_hist);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{	
-			HTYPE glob_hist = h_table->get(0);
-			t_table->update(HTYPE (address) ^ glob_hist, !takenActually);
-			h_table->update(0, !takenActually);
+			HTYPE glob_hist = h_table.get(0);
+			t_table.update(HTYPE (address) ^ glob_hist, !takenActually);
+			h_table.update(0, !takenActually);
+		}
+
+		HTYPE getHistory() 
+		{
+			return h_table.get(0);
 		}
 };
 
-#define PTABLE_SIZE 4096
-#define LHIST_SIZE 4096
-
+template <size_t PTABLE_SIZE, size_t LHIST_SIZE>
 class localHistoryPredictor: public BranchPredictor
 {
 	private:
-		History_Table* h_table;
-		Twobit_Table* t_table;
+		History_Table<PTABLE_SIZE> h_table;
+		Twobit_Table<LHIST_SIZE> t_table;
 
 	public:
-		localHistoryPredictor() 
-		{
-			t_table = new Twobit_Table(PTABLE_SIZE);
-			h_table = new History_Table(LHIST_SIZE);
-		}
-
 		BOOL makePrediction(ADDRINT address)
 		{
-			HTYPE addr_hist = h_table->get(address);
-			return t_table->rd(addr_hist);
+			HTYPE addr_hist = h_table.get(address>>2);
+			return t_table.rd(addr_hist);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{	
-			HTYPE addr_hist = h_table->get(address);
-			t_table->update(addr_hist, !takenActually);
-			h_table->update(address, !takenActually);
+			HTYPE addr_hist = h_table.get(address>>2);
+			t_table.update(addr_hist, !takenActually);
+			h_table.update(address>>2, !takenActually);
+		}
+};
+
+template <size_t CHOICE_SIZE>
+class tourneyPredictor: public BranchPredictor
+{
+	private:
+		localHistoryPredictor<4096, 4096> lhistBP;
+		gsharePredictor<4096> gshareBP;
+		// 0 = localHistory, 1 = gshare
+		Twobit_Table<CHOICE_SIZE> choice;
+		BOOL gPred;
+		BOOL lPred;
+
+	public:
+		BOOL makePrediction(ADDRINT address)
+		{
+			gPred = gshareBP.makePrediction(address);
+			lPred = lhistBP.makePrediction(address);
+			return  choice.rd(address) ? gPred : lPred;
+        }
+
+        void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
+		{
+			choice.update(address, !(gPred == takenActually));
+			choice.update(address, lPred == takenActually);
+			gshareBP.makeUpdate(takenActually, gPred, address);
+			lhistBP.makeUpdate(takenActually, lPred, address);
 		}
 };
 
@@ -177,28 +205,32 @@ class myBranchPredictor: public BranchPredictor
 	private:
 		//BranchPredictor* biBP;
 		//BranchPredictor* gshareBP;
-		BranchPredictor* lhistBP;
+		localHistoryPredictor<1024, 1024> lhistBP;
+		//BranchPredictor* tourneyBP;
 
 	public:
 		myBranchPredictor() 
 		{
 			//biBP = new bimodalPredictor();
 			//gshareBP = new gsharePredictor();
-			lhistBP = new localHistoryPredictor();
+			//lhistBP = new localHistoryPredictor();
+			//tourneyBP = new tourneyPredictor();
 		}
 
 		BOOL makePrediction(ADDRINT address)
 		{
 			//return biBP->makePrediction(address);
 			//return gshareBP->makePrediction(address);
-			return lhistBP->makePrediction(address);
+			return lhistBP.makePrediction(address);
+			//return tourneyBP->makePrediction(address);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
 			//biBP->makeUpdate(takenActually, takenPredicted, address);
 			//gshareBP->makeUpdate(takenActually, takenPredicted, address);
-			lhistBP->makeUpdate(takenActually, takenPredicted, address);
+			lhistBP.makeUpdate(takenActually, takenPredicted, address);
+			//tourneyBP->makeUpdate(takenActually, takenPredicted, address);
 		}
 };
 
