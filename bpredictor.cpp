@@ -253,7 +253,7 @@ class myBranchPredictor: public BranchPredictor
 	private:
 		//BasicPredictor basicBP;
 		//BranchPredictor* gshareBP;
-		localHistoryPredictor<1800, 2048> lhistBP;
+		localHistoryPredictor<4096, 2048, 12> lhistBP;
 		//BranchPredictor* tourneyBP;
 
 	public:
