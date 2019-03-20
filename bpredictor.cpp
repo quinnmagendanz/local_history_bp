@@ -23,6 +23,8 @@ class BranchPredictor
 
 // PASS       | TAKE
 // 0b11, 0b10 | 0b01, 0b00
+// Used if strict enforcement of space utilization required
+///////////////////////////////////////////////
 // https://stackoverflow.com/questions/19492682/create-an-array-with-just-2-bit-for-each-cell-in-c
 template <size_t N> 
 class twoBit
@@ -79,28 +81,6 @@ class Twobit_Table{
 		}
 };
 
-// 0 = Taken, 1 = Not
-typedef unsigned short HTYPE;
-
-template <size_t N>
-class History_Table {
-	private:
-		HTYPE* table;
-
-	public: 
-		History_Table() {
-			table = new HTYPE[N];
-		}
-
-		HTYPE get(int index) {
-			return table[index % N];
-		}
-
-		void update(int index, bool event) {
-			table[index % N] = (table[index % N] << 1) + event;
-		}
-};
-
 template <size_t BIMODAL_SIZE>
 class bimodalPredictor: public BranchPredictor
 {
@@ -122,26 +102,94 @@ class bimodalPredictor: public BranchPredictor
 		}
 
 };
+////////////////////////////////////////////
 
-template <size_t GTABLE_SIZE>
+typedef uint64_t HTYPE;
+
+// Hash functions used to index into a table.
+inline uint64_t addr_i(uint64_t addr, uint64_t hist) {return addr;}
+inline uint64_t xor_i(uint64_t addr, uint64_t hist) {return addr ^ hist;}
+
+// W wide bit counter used to make 1-0 prediction.
+template <size_t W>
+class BitPredictorElement {
+		// W <= 64
+		uint64_t element;
+		
+	public:
+		bool read() {return element >> (W-1);}
+		void inc() {if (element < ((1<<W)-1)) element++;}
+		void dec() {if (element != 0) element--;}
+};
+
+// Table of L bit predictors. 
+template <size_t L, size_t W=2, uint64_t (*hash)(uint64_t addr, uint64_t hist)=(*addr_i)>
+class BitPredictor {
+		BitPredictorElement<W> table[L];
+	
+	public:
+		// State 0 -> take branch
+		// State 1 -> do not take branch
+		BOOL get(ADDRINT addr, HTYPE hist=0) {return !table[hash(addr, hist) % L].read();}
+		void update(BOOL takenActually, ADDRINT addr, HTYPE hist=0)
+		{
+			if (takenActually) table[hash(addr, hist) % L].dec();
+		    else table[hash(addr, hist) % L].inc();
+		}	
+};
+
+// Table of L W wide history registers.
+template <size_t L, size_t W=10, uint64_t (*hash)(uint64_t addr, uint64_t hist)=(*addr_i)>
+class HistoryTable {
+	private:
+		HTYPE table[L];
+
+	public: 
+		HTYPE get(ADDRINT addr, HTYPE hist=0) {
+			return table[hash(addr, hist) % L];
+		}
+
+		void update(bool takenActually, ADDRINT addr, HTYPE hist=0) {
+			table[hash(addr, hist) % L] = ((table[hash(addr, hist) % L] << 1) + !takenActually) & ((1<<W)-1);
+		}
+};
+
+class BasicPredictor : public BranchPredictor
+{
+	private:
+		BitPredictor<1024, 2> t_table;
+
+	public:
+		BOOL makePrediction(ADDRINT address)
+		{
+			return t_table.get(address);
+        }
+
+        void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
+		{	
+			t_table.update(takenActually, address);
+		}
+};
+
+template <size_t GPRED_SIZE, size_t GHIST_SIZE=10, uint64_t (*hash)(uint64_t addr, uint64_t hist)=(*xor_i)>
 class gsharePredictor: public BranchPredictor
 {
 	private:
-		History_Table<1> h_table;
-		Twobit_Table<GTABLE_SIZE> t_table;
+		HistoryTable<1, GHIST_SIZE> h_table;
+		BitPredictor<GPRED_SIZE, 2, (*hash)> t_table;
 
 	public:
 		BOOL makePrediction(ADDRINT address)
 		{
 			HTYPE glob_hist = h_table.get(0);
-			return t_table.rd(HTYPE (address) ^ glob_hist);
+			return t_table.get(address, glob_hist);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{	
 			HTYPE glob_hist = h_table.get(0);
-			t_table.update(HTYPE (address) ^ glob_hist, !takenActually);
-			h_table.update(0, !takenActually);
+			t_table.update(takenActually, address, glob_hist);
+			h_table.update(takenActually, 0);
 		}
 
 		HTYPE getHistory() 
@@ -150,36 +198,36 @@ class gsharePredictor: public BranchPredictor
 		}
 };
 
-template <size_t PTABLE_SIZE, size_t LHIST_SIZE>
+template <size_t PTABLE_SIZE, size_t LHIST_SIZE, size_t HIST_SIZE=10>
 class localHistoryPredictor: public BranchPredictor
 {
 	private:
-		History_Table<PTABLE_SIZE> h_table;
-		Twobit_Table<LHIST_SIZE> t_table;
+		HistoryTable<LHIST_SIZE, HIST_SIZE> h_table;
+		BitPredictor<PTABLE_SIZE> t_table;
 
 	public:
 		BOOL makePrediction(ADDRINT address)
 		{
-			HTYPE addr_hist = h_table.get(address>>2);
-			return t_table.rd(addr_hist);
+			HTYPE addr_hist = h_table.get(address);
+			return t_table.get(addr_hist);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{	
-			HTYPE addr_hist = h_table.get(address>>2);
-			t_table.update(addr_hist, !takenActually);
-			h_table.update(address>>2, !takenActually);
+			HTYPE addr_hist = h_table.get(address);
+			t_table.update(takenActually, addr_hist);
+			h_table.update(takenActually, address);
 		}
 };
 
-template <size_t CHOICE_SIZE>
+template <size_t CHOICE_SIZE, size_t LPRED_SIZE, size_t LHIST_SIZE, size_t GPRED_SIZE, size_t GHIST_SIZE>
 class tourneyPredictor: public BranchPredictor
 {
 	private:
-		localHistoryPredictor<4096, 4096> lhistBP;
-		gsharePredictor<4096> gshareBP;
+		localHistoryPredictor<LPRED_SIZE, LHIST_SIZE> lhistBP;
+		gsharePredictor<GPRED_SIZE, GHIST_SIZE> gshareBP;
 		// 0 = localHistory, 1 = gshare
-		Twobit_Table<CHOICE_SIZE> choice;
+		BitPredictor<CHOICE_SIZE> choice;
 		BOOL gPred;
 		BOOL lPred;
 
@@ -188,13 +236,13 @@ class tourneyPredictor: public BranchPredictor
 		{
 			gPred = gshareBP.makePrediction(address);
 			lPred = lhistBP.makePrediction(address);
-			return  choice.rd(address) ? gPred : lPred;
+			return  choice.rd(address) ? lPred : gPred;
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
-			choice.update(address, !(gPred == takenActually));
-			choice.update(address, lPred == takenActually);
+			choice.update(address, gPred == takenActually);
+			choice.update(address, !(lPred == takenActually));
 			gshareBP.makeUpdate(takenActually, gPred, address);
 			lhistBP.makeUpdate(takenActually, lPred, address);
 		}
@@ -203,23 +251,15 @@ class tourneyPredictor: public BranchPredictor
 class myBranchPredictor: public BranchPredictor
 {
 	private:
-		//BranchPredictor* biBP;
+		//BasicPredictor basicBP;
 		//BranchPredictor* gshareBP;
-		localHistoryPredictor<1024, 1024> lhistBP;
+		localHistoryPredictor<1800, 2048> lhistBP;
 		//BranchPredictor* tourneyBP;
 
 	public:
-		myBranchPredictor() 
-		{
-			//biBP = new bimodalPredictor();
-			//gshareBP = new gsharePredictor();
-			//lhistBP = new localHistoryPredictor();
-			//tourneyBP = new tourneyPredictor();
-		}
-
 		BOOL makePrediction(ADDRINT address)
 		{
-			//return biBP->makePrediction(address);
+			//return basicBP.makePrediction(address);
 			//return gshareBP->makePrediction(address);
 			return lhistBP.makePrediction(address);
 			//return tourneyBP->makePrediction(address);
@@ -227,7 +267,7 @@ class myBranchPredictor: public BranchPredictor
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
-			//biBP->makeUpdate(takenActually, takenPredicted, address);
+			//basicBP.makeUpdate(takenActually, takenPredicted, address);
 			//gshareBP->makeUpdate(takenActually, takenPredicted, address);
 			lhistBP.makeUpdate(takenActually, takenPredicted, address);
 			//tourneyBP->makeUpdate(takenActually, takenPredicted, address);
@@ -306,7 +346,7 @@ VOID Fini(int, VOID * v)
     assert(outfile = fopen(KnobOutputFile.Value().c_str(),"w"));
     fprintf(outfile, "takenCorrect %lu takenIncorrect %lu notTakenCorrect %lu notTakenIncorrect %lu\n", takenCorrect, takenIncorrect, notTakenCorrect, notTakenIncorrect);
 	// TODO(magendanz) remove before submitting.
-	fprintf(outfile, "Correctness: %lu%\n", (100*(takenCorrect + notTakenCorrect))/(takenCorrect + takenIncorrect + notTakenCorrect + notTakenIncorrect));
+	fprintf(outfile, "Correctness: %lu%%\n", (100lu*(takenCorrect + notTakenCorrect))/(takenCorrect + takenIncorrect + notTakenCorrect + notTakenIncorrect));
 }
 
 
