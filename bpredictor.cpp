@@ -108,7 +108,7 @@ typedef uint64_t HTYPE;
 
 // Hash functions used to index into a table.
 inline uint64_t addr_i(uint64_t addr, uint64_t hist) {return addr;}
-inline uint64_t xor_i(uint64_t addr, uint64_t hist) {return addr ^ hist;}
+inline uint64_t xor_i(uint64_t addr, uint64_t hist) {return (addr) ^ hist;}
 
 // W wide bit counter used to make 1-0 prediction.
 template <size_t W>
@@ -171,12 +171,12 @@ class BasicPredictor : public BranchPredictor
 		}
 };
 
-template <size_t GPRED_SIZE, size_t GHIST_SIZE=10, uint64_t (*hash)(uint64_t addr, uint64_t hist)=(*xor_i)>
-class gsharePredictor: public BranchPredictor
+template <size_t GPRED_L, size_t GHIST_SIZE=10, uint64_t (*hash)(uint64_t addr, uint64_t hist)=(*xor_i)>
+class GlobalPredictor: public BranchPredictor
 {
 	private:
 		HistoryTable<1, GHIST_SIZE> h_table;
-		BitPredictor<GPRED_SIZE, 2, (*hash)> t_table;
+		BitPredictor<GPRED_L, 2, (*hash)> t_table;
 
 	public:
 		BOOL makePrediction(ADDRINT address)
@@ -198,12 +198,12 @@ class gsharePredictor: public BranchPredictor
 		}
 };
 
-template <size_t PTABLE_SIZE, size_t LHIST_SIZE, size_t HIST_SIZE=10>
-class localHistoryPredictor: public BranchPredictor
+template <size_t PTABLE_L, size_t LTABLE_L, size_t LHIST_SIZE=10>
+class LocalHistoryPredictor: public BranchPredictor
 {
 	private:
-		HistoryTable<LHIST_SIZE, HIST_SIZE> h_table;
-		BitPredictor<PTABLE_SIZE> t_table;
+		HistoryTable<LTABLE_L, LHIST_SIZE> h_table;
+		BitPredictor<PTABLE_L> t_table;
 
 	public:
 		BOOL makePrediction(ADDRINT address)
@@ -220,30 +220,32 @@ class localHistoryPredictor: public BranchPredictor
 		}
 };
 
-template <size_t CHOICE_SIZE, size_t LPRED_SIZE, size_t LHIST_SIZE, size_t GPRED_SIZE, size_t GHIST_SIZE>
-class tourneyPredictor: public BranchPredictor
+template <size_t CHOICE_L, size_t LPRED_L, size_t LTABLE_L, size_t GPRED_L, size_t LHIST_SIZE=10, size_t GHIST_SIZE=12>
+class TourneyPredictor: public BranchPredictor
 {
 	private:
-		localHistoryPredictor<LPRED_SIZE, LHIST_SIZE> lhistBP;
-		gsharePredictor<GPRED_SIZE, GHIST_SIZE> gshareBP;
-		// 0 = localHistory, 1 = gshare
-		BitPredictor<CHOICE_SIZE> choice;
+		LocalHistoryPredictor<LPRED_L, LTABLE_L, LHIST_SIZE> lhistBP;
+		GlobalPredictor<GPRED_L, GHIST_SIZE> globalBP;
+		// 1 = localHistory, 0 = gshare
+		BitPredictor<CHOICE_L> choice;
 		BOOL gPred;
 		BOOL lPred;
 
 	public:
 		BOOL makePrediction(ADDRINT address)
 		{
-			gPred = gshareBP.makePrediction(address);
+			gPred = globalBP.makePrediction(address);
 			lPred = lhistBP.makePrediction(address);
-			return  choice.rd(address) ? lPred : gPred;
+			HTYPE g_hist = globalBP.getHistory();
+			return  choice.get(g_hist) ? lPred : gPred;
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
-			choice.update(address, gPred == takenActually);
-			choice.update(address, !(lPred == takenActually));
-			gshareBP.makeUpdate(takenActually, gPred, address);
+			HTYPE g_hist = globalBP.getHistory();
+			choice.update(g_hist, !(gPred == takenActually));
+			choice.update(g_hist, lPred == takenActually);
+			globalBP.makeUpdate(takenActually, gPred, address);
 			lhistBP.makeUpdate(takenActually, lPred, address);
 		}
 };
@@ -252,25 +254,29 @@ class myBranchPredictor: public BranchPredictor
 {
 	private:
 		//BasicPredictor basicBP;
-		//BranchPredictor* gshareBP;
-		localHistoryPredictor<4096, 2048, 12> lhistBP;
-		//BranchPredictor* tourneyBP;
+		//GlobalPredictor<8192, 16> globalBP;
+		LocalHistoryPredictor<4096, 2048, 12> lhistBP;
+		// 95% 4096, 2048, 12
+		//TourneyPredictor<1024, 3000, 2048, 600, 12, 16> tourneyBP;
+		// 94.9% 1024, 3000, 2048, 600, 12, 16
+		// 94.4% 4096, 1024, 1024, 4096, 10, 12
+		// 94.6% 2048, 1700, 2048, 2048, 12, 12
 
 	public:
 		BOOL makePrediction(ADDRINT address)
 		{
 			//return basicBP.makePrediction(address);
-			//return gshareBP->makePrediction(address);
+			//return globalBP.makePrediction(address);
 			return lhistBP.makePrediction(address);
-			//return tourneyBP->makePrediction(address);
+			//return tourneyBP.makePrediction(address);
         }
 
         void makeUpdate(BOOL takenActually, BOOL takenPredicted, ADDRINT address)
 		{
 			//basicBP.makeUpdate(takenActually, takenPredicted, address);
-			//gshareBP->makeUpdate(takenActually, takenPredicted, address);
+			//globalBP.makeUpdate(takenActually, takenPredicted, address);
 			lhistBP.makeUpdate(takenActually, takenPredicted, address);
-			//tourneyBP->makeUpdate(takenActually, takenPredicted, address);
+			//tourneyBP.makeUpdate(takenActually, takenPredicted, address);
 		}
 };
 
